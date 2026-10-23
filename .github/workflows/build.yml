@@ -1,10 +1,13 @@
+yaml
 name: build
 
 on:
   push:
     branches: [ main, master ]
-  pull_request:
   workflow_dispatch:
+
+permissions:
+  contents: write
 
 jobs:
   build:
@@ -21,10 +24,95 @@ jobs:
         with:
           gradle-version: 8.12
 
+      - name: Uloz pliki w poprawnych folderach
+        run: |
+          set -e
+          J=src/main/java/pl/autoreroll
+          R=src/main/resources
+          mkdir -p $J/mixin $R/assets/autoreroll/lang
+          mv_file() {
+            if [ -f "$2/$1" ]; then return 0; fi
+            p=$(find . -name "$1" -not -path "./.git/*" -not -path "./build/*" -not -path "./.gradle/*" | head -1)
+            if [ -z "$p" ]; then echo "BRAK PLIKU: $1"; exit 1; fi
+            mv "$p" "$2/$1"
+          }
+          mv_file AutoRerollClient.java $J
+          mv_file RerollConfig.java $J
+          mv_file RerollConfigScreen.java $J
+          mv_file HandledScreenMixin.java $J/mixin
+          mv_file fabric.mod.json $R
+          mv_file autoreroll.mixins.json $R
+          mv_file en_us.json $R/assets/autoreroll/lang
+          for f in build.gradle settings.gradle gradle.properties; do
+            [ -f "$f" ] || { echo "BRAK PLIKU: $f"; exit 1; }
+          done
+
+      - name: Standardowy build.gradle
+        run: |
+          cat > build.gradle <<'EOF'
+          plugins {
+          	id 'fabric-loom' version '1.9-SNAPSHOT'
+          	id 'maven-publish'
+          }
+
+          version = project.mod_version
+          group = project.maven_group
+
+          base {
+          	archivesName = project.archives_base_name
+          }
+
+          repositories {
+          }
+
+          dependencies {
+          	minecraft "com.mojang:minecraft:${project.minecraft_version}"
+          	mappings "net.fabricmc:yarn:${project.yarn_mappings}:v2"
+          	modImplementation "net.fabricmc:fabric-loader:${project.loader_version}"
+          	modImplementation "net.fabricmc.fabric-api:fabric-api:${project.fabric_version}"
+          }
+
+          processResources {
+          	inputs.property "version", project.version
+          	filesMatching("fabric.mod.json") {
+          		expand "version": inputs.properties.version
+          	}
+          }
+
+          tasks.withType(JavaCompile).configureEach {
+          	it.options.release = 21
+          }
+
+          java {
+          	sourceCompatibility = JavaVersion.VERSION_21
+          	targetCompatibility = JavaVersion.VERSION_21
+          	withSourcesJar()
+          }
+          EOF
+
       - name: Build
         run: gradle build --no-daemon
+
+      - name: Sprawdz zawartosc jara
+        run: |
+          set -e
+          JAR=$(ls build/libs/*.jar | grep -v -- '-sources' | head -1)
+          echo "Jar: $JAR"
+          unzip -l "$JAR"
+          for need in fabric.mod.json autoreroll.mixins.json assets/autoreroll/lang/en_us.json pl/autoreroll/AutoRerollClient.class pl/autoreroll/mixin/HandledScreenMixin.class; do
+            unzip -l "$JAR" | grep -q "$need" || { echo "W JARZE BRAK: $need"; exit 1; }
+          done
+          mkdir -p out
+          cp "$JAR" out/autoreroll.jar
 
       - uses: actions/upload-artifact@v4
         with:
           name: autoreroll
-          path: build/libs/*.jar
+          path: out/autoreroll.jar
+
+      - name: Release z samym jarem
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: mod-latest
+          name: AutoReroll (najnowszy build)
+          files: out/autoreroll.jar
